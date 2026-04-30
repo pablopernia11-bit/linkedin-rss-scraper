@@ -1,0 +1,4 @@
+selenium==4.21.0
+feedgen==1.0.0
+python-dotenv==1.0.1
+webdriver-manager==4.0.1
