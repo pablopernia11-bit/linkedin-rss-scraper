@@ -108,7 +108,9 @@ def scroll_to_load(driver: webdriver.Chrome, passes: int = SCROLL_PASSES) -> Non
 def _text_from(element, selectors: list[str]) -> str:
     for sel in selectors:
         try:
-            return element.find_element(By.CSS_SELECTOR, sel).text.strip()
+            text = element.find_element(By.CSS_SELECTOR, sel).text.strip()
+            if text:
+                return text
         except NoSuchElementException:
             continue
     return ""
@@ -135,8 +137,10 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
     # activity URN scheme, which is far more stable than CSS class names.
     # Fallback drops the attribute filter for broader matching.
     #
-    # TEXT_SELECTORS: description-wrapper is the outermost text block;
-    # update-components-text is the inner rendered span used in newer layouts.
+    # TEXT_SELECTORS: ordered from most specific to most generic.
+    # If all CSS selectors fail, the loop falls back to elem.text (the full
+    # visible text of the container) and then to a URL-based placeholder,
+    # so the feed is never left empty when containers are found.
     #
     # LINK_SELECTORS: update-components-mini-update-v2__link-to-details-page
     # is the dedicated permalink anchor LinkedIn injects on every post card.
@@ -152,6 +156,11 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
         ".feed-shared-update-v2__description-wrapper",
         ".update-components-text",
         ".feed-shared-text",
+        ".feed-shared-text__text-view",
+        ".attributed-text-segment-list__content",
+        "span[dir='ltr']",
+        ".break-words span",
+        ".update-components-text relative-time",
     ]
     LINK_SELECTORS = [
         "a.update-components-mini-update-v2__link-to-details-page",
@@ -174,8 +183,15 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
     for elem in containers[:MAX_POSTS_PER_COMPANY]:
         try:
             text = _text_from(elem, TEXT_SELECTORS)
+
+            # Fallback 1: use the container's full visible text (may include
+            # actor name and metadata, but is better than an empty feed).
             if not text:
-                continue
+                text = elem.text.strip()
+
+            # Fallback 2: generic placeholder so the entry is never titleless.
+            if not text:
+                text = f"Post from {company_url}"
 
             link = _attr_from(elem, LINK_SELECTORS, "href") or company_url
             date_dt = _attr_from(elem, DATE_SELECTORS, "datetime")
