@@ -30,6 +30,9 @@ SCROLL_PASSES = 3
 LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")
 LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
 
+# URL path fragments that indicate LinkedIn already has an active session.
+_LOGGED_IN_PATHS = ("/feed", "/mynetwork", "/jobs", "/messaging", "/notifications")
+
 
 def build_driver() -> webdriver.Chrome:
     options = Options()
@@ -76,8 +79,19 @@ def login(driver: webdriver.Chrome) -> None:
             "Set LINKEDIN_EMAIL and LINKEDIN_PASSWORD as GitHub Actions secrets, "
             "or run the script locally first to generate session.json."
         )
-    print("No session found — logging in with credentials...")
+    print("No session found — navigating to LinkedIn login...")
     driver.get("https://www.linkedin.com/login")
+
+    # Wait until the page has settled on a LinkedIn URL.
+    WebDriverWait(driver, 10).until(lambda d: "linkedin.com" in d.current_url)
+
+    # LinkedIn redirects away from /login when the browser already has a valid
+    # session (e.g. cookies set by a previous run). Skip the form in that case.
+    if any(driver.current_url.startswith(f"https://www.linkedin.com{p}") for p in _LOGGED_IN_PATHS):
+        print(f"Already logged in (redirected to {driver.current_url}). Saving session.")
+        save_session(driver)
+        return
+
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "username")))
     driver.find_element(By.ID, "username").send_keys(LINKEDIN_EMAIL)
     driver.find_element(By.ID, "password").send_keys(LINKEDIN_PASSWORD)
@@ -108,7 +122,9 @@ def scroll_to_load(driver: webdriver.Chrome, passes: int = SCROLL_PASSES) -> Non
 def _text_from(element, selectors: list[str]) -> str:
     for sel in selectors:
         try:
-            return element.find_element(By.CSS_SELECTOR, sel).text.strip()
+            text = element.find_element(By.CSS_SELECTOR, sel).text.strip()
+            if text:
+                return text
         except NoSuchElementException:
             continue
     return ""
@@ -135,8 +151,10 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
     # activity URN scheme, which is far more stable than CSS class names.
     # Fallback drops the attribute filter for broader matching.
     #
-    # TEXT_SELECTORS: description-wrapper is the outermost text block;
-    # update-components-text is the inner rendered span used in newer layouts.
+    # TEXT_SELECTORS: ordered from most specific to most generic.
+    # If all CSS selectors fail, the loop falls back to elem.text (the full
+    # visible text of the container) and then to a URL-based placeholder,
+    # so the feed is never left empty when containers are found.
     #
     # LINK_SELECTORS: update-components-mini-update-v2__link-to-details-page
     # is the dedicated permalink anchor LinkedIn injects on every post card.
@@ -152,6 +170,11 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
         ".feed-shared-update-v2__description-wrapper",
         ".update-components-text",
         ".feed-shared-text",
+        ".feed-shared-text__text-view",
+        ".attributed-text-segment-list__content",
+        "span[dir='ltr']",
+        ".break-words span",
+        ".update-components-text relative-time",
     ]
     LINK_SELECTORS = [
         "a.update-components-mini-update-v2__link-to-details-page",
@@ -174,8 +197,15 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
     for elem in containers[:MAX_POSTS_PER_COMPANY]:
         try:
             text = _text_from(elem, TEXT_SELECTORS)
+
+            # Fallback 1: use the container's full visible text (may include
+            # actor name and metadata, but is better than an empty feed).
             if not text:
-                continue
+                text = elem.text.strip()
+
+            # Fallback 2: generic placeholder so the entry is never titleless.
+            if not text:
+                text = f"Post from {company_url}"
 
             link = _attr_from(elem, LINK_SELECTORS, "href") or company_url
             date_dt = _attr_from(elem, DATE_SELECTORS, "datetime")
