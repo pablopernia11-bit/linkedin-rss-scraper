@@ -55,9 +55,8 @@ def save_session(driver: webdriver.Chrome) -> None:
     print(f"Session saved to {SESSION_FILE}")
 
 
-def load_session(driver: webdriver.Chrome) -> bool:
-    if not Path(SESSION_FILE).exists():
-        return False
+def load_session(driver: webdriver.Chrome) -> None:
+    """Inject cookies from session.json into the browser."""
     driver.get("https://www.linkedin.com")
     with open(SESSION_FILE) as fh:
         cookies = json.load(fh)
@@ -68,29 +67,16 @@ def load_session(driver: webdriver.Chrome) -> bool:
         except Exception:
             pass
     driver.refresh()
-    return True
-
-
-def is_logged_in(driver: webdriver.Chrome) -> bool:
-    driver.get("https://www.linkedin.com/feed/")
-    try:
-        WebDriverWait(driver, 12).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, ".feed-identity-module, [data-test-id='nav-settings__account-type-label']")
-            )
-        )
-        return True
-    except TimeoutException:
-        return False
 
 
 def login(driver: webdriver.Chrome) -> None:
     if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
         raise EnvironmentError(
-            "Set LINKEDIN_EMAIL and LINKEDIN_PASSWORD in your .env file "
-            "(or as GitHub Actions secrets)."
+            "No session.json found and no credentials available. "
+            "Set LINKEDIN_EMAIL and LINKEDIN_PASSWORD as GitHub Actions secrets, "
+            "or run the script locally first to generate session.json."
         )
-    print("Logging in to LinkedIn...")
+    print("No session found — logging in with credentials...")
     driver.get("https://www.linkedin.com/login")
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "username")))
     driver.find_element(By.ID, "username").send_keys(LINKEDIN_EMAIL)
@@ -240,11 +226,14 @@ def generate_rss(all_posts: list[dict]) -> None:
 def main() -> None:
     driver = build_driver()
     try:
-        logged_in = load_session(driver) and is_logged_in(driver)
-        if not logged_in:
-            login(driver)
+        if Path(SESSION_FILE).exists():
+            print(f"Found {SESSION_FILE} — loading cookies directly (skipping credential login)...")
+            load_session(driver)
+            print("Session restored.")
         else:
-            print("Session restored from session.json")
+            # No cached session: fall back to username/password login.
+            # login() raises EnvironmentError immediately if credentials are missing.
+            login(driver)
 
         all_posts: list[dict] = []
         for url in COMPANY_URLS:
