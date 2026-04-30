@@ -129,37 +129,48 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
     time.sleep(3)
     scroll_to_load(driver)
 
-    # LinkedIn periodically changes its DOM class names;
-    # update these selectors if posts stop being detected.
-    POST_CONTAINERS = [
-        ".feed-shared-update-v2",
-        ".occludable-update",
-        "[data-urn]",
-    ]
+    # ---- Selectors verified against LinkedIn's live DOM (2026) ----
+    #
+    # POST_CONTAINERS: data-urn*='activity' anchors to LinkedIn's internal
+    # activity URN scheme, which is far more stable than CSS class names.
+    # Fallback drops the attribute filter for broader matching.
+    #
+    # TEXT_SELECTORS: description-wrapper is the outermost text block;
+    # update-components-text is the inner rendered span used in newer layouts.
+    #
+    # LINK_SELECTORS: update-components-mini-update-v2__link-to-details-page
+    # is the dedicated permalink anchor LinkedIn injects on every post card.
+    #
+    # DATE_SELECTORS: sub-description holds a human-readable age string
+    # (e.g. "2d", "1w"); aria-hidden='true' targets the visible copy when
+    # LinkedIn renders both visible and screen-reader variants.
+    # ---------------------------------------------------------------
+    PRIMARY_CONTAINER_SEL = "div.feed-shared-update-v2[data-urn*='activity']"
+    FALLBACK_CONTAINER_SEL = "div.feed-shared-update-v2"
+
     TEXT_SELECTORS = [
-        ".feed-shared-text .break-words",
-        ".feed-shared-text__text-view",
-        ".attributed-text-segment-list__content",
+        ".feed-shared-update-v2__description-wrapper",
         ".update-components-text",
         ".feed-shared-text",
     ]
     LINK_SELECTORS = [
+        "a.update-components-mini-update-v2__link-to-details-page",
         "a[href*='/feed/update/urn']",
         "a[href*='/posts/']",
     ]
     DATE_SELECTORS = [
-        "time",
-        ".feed-shared-actor__sub-description",
+        ".update-components-actor__sub-description span[aria-hidden='true']",
         ".update-components-actor__sub-description",
+        "time",
     ]
 
-    posts: list[dict] = []
-    containers = []
-    for sel in POST_CONTAINERS:
-        containers = driver.find_elements(By.CSS_SELECTOR, sel)
-        if containers:
-            break
+    containers = driver.find_elements(By.CSS_SELECTOR, PRIMARY_CONTAINER_SEL)
+    if not containers:
+        print("  Primary container selector returned 0 results, trying fallback...")
+        containers = driver.find_elements(By.CSS_SELECTOR, FALLBACK_CONTAINER_SEL)
+    print(f"  Found {len(containers)} post containers")
 
+    posts: list[dict] = []
     for elem in containers[:MAX_POSTS_PER_COMPANY]:
         try:
             text = _text_from(elem, TEXT_SELECTORS)
