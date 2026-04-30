@@ -30,6 +30,9 @@ SCROLL_PASSES = 3
 LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")
 LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
 
+# URL path fragments that indicate LinkedIn already has an active session.
+_LOGGED_IN_PATHS = ("/feed", "/mynetwork", "/jobs", "/messaging", "/notifications")
+
 
 def build_driver() -> webdriver.Chrome:
     options = Options()
@@ -76,8 +79,19 @@ def login(driver: webdriver.Chrome) -> None:
             "Set LINKEDIN_EMAIL and LINKEDIN_PASSWORD as GitHub Actions secrets, "
             "or run the script locally first to generate session.json."
         )
-    print("No session found — logging in with credentials...")
+    print("No session found — navigating to LinkedIn login...")
     driver.get("https://www.linkedin.com/login")
+
+    # Wait until the page has settled on a LinkedIn URL.
+    WebDriverWait(driver, 10).until(lambda d: "linkedin.com" in d.current_url)
+
+    # LinkedIn redirects away from /login when the browser already has a valid
+    # session (e.g. cookies set by a previous run). Skip the form in that case.
+    if any(driver.current_url.startswith(f"https://www.linkedin.com{p}") for p in _LOGGED_IN_PATHS):
+        print(f"Already logged in (redirected to {driver.current_url}). Saving session.")
+        save_session(driver)
+        return
+
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "username")))
     driver.find_element(By.ID, "username").send_keys(LINKEDIN_EMAIL)
     driver.find_element(By.ID, "password").send_keys(LINKEDIN_PASSWORD)
