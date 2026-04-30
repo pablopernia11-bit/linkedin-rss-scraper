@@ -10,7 +10,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException
 from feedgen.feed import FeedGenerator
 
 load_dotenv()
@@ -119,113 +119,82 @@ def scroll_to_load(driver: webdriver.Chrome, passes: int = SCROLL_PASSES) -> Non
         time.sleep(2.5)
 
 
-def _text_from(element, selectors: list[str]) -> str:
-    for sel in selectors:
-        try:
-            text = element.find_element(By.CSS_SELECTOR, sel).text.strip()
-            if text:
-                return text
-        except NoSuchElementException:
-            continue
-    return ""
-
-
-def _attr_from(element, selectors: list[str], attr: str) -> str:
-    for sel in selectors:
-        try:
-            return element.find_element(By.CSS_SELECTOR, sel).get_attribute(attr) or ""
-        except NoSuchElementException:
-            continue
-    return ""
-
-
 def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dict]:
     posts_url = company_url.rstrip("/") + "/posts/"
     driver.get(posts_url)
-
-    # Wait for JS to start rendering dynamic content before interacting.
     time.sleep(5)
     scroll_to_load(driver)
-    # Let lazy-loaded content finish rendering after scrolling.
     time.sleep(3)
 
-    # ---- Selectors verified against LinkedIn's live DOM (2026) ----
-    #
-    # POST_CONTAINERS: data-urn*='activity' anchors to LinkedIn's internal
-    # activity URN scheme, which is far more stable than CSS class names.
-    # Fallback drops the attribute filter for broader matching.
-    #
-    # TEXT_SELECTORS: used only if elem.text is empty (e.g. content is still
-    # hidden behind a shadow root or a visibility:hidden clone).
-    #
-    # LINK_SELECTORS: update-components-mini-update-v2__link-to-details-page
-    # is the dedicated permalink anchor LinkedIn injects on every post card.
-    #
-    # DATE_SELECTORS: sub-description holds a human-readable age string
-    # (e.g. "2d", "1w"); aria-hidden='true' targets the visible copy when
-    # LinkedIn renders both visible and screen-reader variants.
-    # ---------------------------------------------------------------
-    PRIMARY_CONTAINER_SEL = "div.feed-shared-update-v2[data-urn*='activity']"
-    FALLBACK_CONTAINER_SEL = "div.feed-shared-update-v2"
+    # Extract all post data in a single JavaScript call.
+    # Using innerText (not textContent) forces the browser's rendering engine
+    # to compute the visible text, which works correctly in headless mode and
+    # bypasses lazy-loading issues that affect Selenium's element.text.
+    raw_posts: list[dict] = driver.execute_script(
+        """
+        const seen = new Set();
+        const results = [];
 
-    TEXT_SELECTORS = [
-        ".feed-shared-update-v2__description-wrapper",
-        ".update-components-text",
-        ".feed-shared-text",
-        ".feed-shared-text__text-view",
-        ".attributed-text-segment-list__content",
-        "span[dir='ltr']",
-        ".break-words span",
-        ".update-components-text relative-time",
-    ]
-    LINK_SELECTORS = [
-        "a.update-components-mini-update-v2__link-to-details-page",
-        "a[href*='/feed/update/urn']",
-        "a[href*='/posts/']",
-    ]
-    DATE_SELECTORS = [
-        ".update-components-actor__sub-description span[aria-hidden='true']",
-        ".update-components-actor__sub-description",
-        "time",
-    ]
+        // Try the most specific selector first (activity URN), then broader.
+        const containers = Array.from(
+            document.querySelectorAll(
+                'div.feed-shared-update-v2[data-urn*="activity"], div.feed-shared-update-v2'
+            )
+        );
 
-    containers = driver.find_elements(By.CSS_SELECTOR, PRIMARY_CONTAINER_SEL)
-    if not containers:
-        print("  Primary container selector returned 0 results, trying fallback...")
-        containers = driver.find_elements(By.CSS_SELECTOR, FALLBACK_CONTAINER_SEL)
-    print(f"  Found {len(containers)} post containers")
+        for (const el of containers) {
+            if (results.length >= arguments[0]) break;
+
+            // Deduplicate by URN when available, otherwise by text hash.
+            const urn = el.getAttribute('data-urn') || '';
+            const dedupeKey = urn || el.innerText.slice(0, 80);
+            if (dedupeKey && seen.has(dedupeKey)) continue;
+            if (dedupeKey) seen.add(dedupeKey);
+
+            const linkEl = el.querySelector(
+                'a.update-components-mini-update-v2__link-to-details-page, ' +
+                'a[href*="/feed/update/urn"], ' +
+                'a[href*="/posts/"]'
+            );
+            const dateEl = el.querySelector(
+                '.update-components-actor__sub-description span[aria-hidden="true"], ' +
+                '.update-components-actor__sub-description, ' +
+                'time'
+            );
+
+            results.push({
+                text: el.innerText.trim(),
+                href: linkEl ? linkEl.href : '',
+                date: dateEl
+                    ? (dateEl.getAttribute('datetime') || dateEl.innerText || '').trim()
+                    : '',
+                urn: urn
+            });
+        }
+        return results;
+        """,
+        MAX_POSTS_PER_COMPANY,
+    )
+
+    print(f"  Extracted {len(raw_posts)} posts via JavaScript")
 
     posts: list[dict] = []
-    for elem in containers[:MAX_POSTS_PER_COMPANY]:
-        try:
-            # Priority 1: full visible text of the container — most reliable
-            # once JS has finished rendering, as it needs no specific selector.
-            text = elem.text.strip()
+    for item in raw_posts:
+        text = (item.get("text") or "").strip()
+        if not text:
+            text = f"Post from {company_url}"
 
-            # Priority 2: CSS selectors targeting the post body specifically
-            # (produces cleaner output, without actor name / reaction counts).
-            if not text:
-                text = _text_from(elem, TEXT_SELECTORS)
+        link = item.get("href") or company_url
+        date_txt = (item.get("date") or "").strip()
 
-            # Priority 3: placeholder so the feed is never empty.
-            if not text:
-                text = f"Post from {company_url}"
-
-            link = _attr_from(elem, LINK_SELECTORS, "href") or company_url
-            date_dt = _attr_from(elem, DATE_SELECTORS, "datetime")
-            date_txt = date_dt or _text_from(elem, DATE_SELECTORS)
-
-            posts.append(
-                {
-                    "text": text,
-                    "link": link,
-                    "date": date_txt,
-                    "company_url": company_url,
-                }
-            )
-        except Exception as exc:
-            print(f"  Skipping post element: {exc}")
-            continue
+        posts.append(
+            {
+                "text": text,
+                "link": link,
+                "date": date_txt,
+                "company_url": company_url,
+            }
+        )
 
     return posts
 
@@ -276,8 +245,6 @@ def main() -> None:
             load_session(driver)
             print("Session restored.")
         else:
-            # No cached session: fall back to username/password login.
-            # login() raises EnvironmentError immediately if credentials are missing.
             login(driver)
 
         all_posts: list[dict] = []
