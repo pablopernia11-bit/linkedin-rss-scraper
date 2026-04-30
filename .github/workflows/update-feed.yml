@@ -1,0 +1,70 @@
+name: Update LinkedIn RSS Feed
+
+on:
+  schedule:
+    # Runs every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  update-feed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to commit feed.xml back to the repo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install ChromeDriver
+        uses: nanasess/setup-chromedriver@v2
+
+      - name: Restore LinkedIn session cache
+        uses: actions/cache@v4
+        with:
+          path: session.json
+          # New cache key each run, but restores the most recent previous run
+          key: linkedin-session-${{ github.run_id }}
+          restore-keys: |
+            linkedin-session-
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          LINKEDIN_EMAIL: ${{ secrets.LINKEDIN_EMAIL }}
+          LINKEDIN_PASSWORD: ${{ secrets.LINKEDIN_PASSWORD }}
+        run: python scraper.py
+
+      - name: Save LinkedIn session to cache
+        # Always save the session, even if the scraper step failed
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: session.json
+          key: linkedin-session-${{ github.run_id }}
+
+      - name: Commit updated feed.xml
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add feed.xml
+          # Only commit if feed.xml actually changed
+          git diff --staged --quiet || git commit -m "chore: update RSS feed [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+          git push origin ${{ github.ref_name }}
