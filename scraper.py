@@ -24,7 +24,7 @@ COMPANY_URLS = [
 SESSION_FILE = "session.json"
 FEED_FILE = "feed.xml"
 MAX_POSTS_PER_COMPANY = 15
-SCROLL_PASSES = 3
+SCROLL_PASSES = 5
 # ──────────────────────────────────────────────────────────────────────────────
 
 LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")
@@ -142,8 +142,12 @@ def _attr_from(element, selectors: list[str], attr: str) -> str:
 def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dict]:
     posts_url = company_url.rstrip("/") + "/posts/"
     driver.get(posts_url)
-    time.sleep(3)
+
+    # Wait for JS to start rendering dynamic content before interacting.
+    time.sleep(5)
     scroll_to_load(driver)
+    # Let lazy-loaded content finish rendering after scrolling.
+    time.sleep(3)
 
     # ---- Selectors verified against LinkedIn's live DOM (2026) ----
     #
@@ -151,10 +155,8 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
     # activity URN scheme, which is far more stable than CSS class names.
     # Fallback drops the attribute filter for broader matching.
     #
-    # TEXT_SELECTORS: ordered from most specific to most generic.
-    # If all CSS selectors fail, the loop falls back to elem.text (the full
-    # visible text of the container) and then to a URL-based placeholder,
-    # so the feed is never left empty when containers are found.
+    # TEXT_SELECTORS: used only if elem.text is empty (e.g. content is still
+    # hidden behind a shadow root or a visibility:hidden clone).
     #
     # LINK_SELECTORS: update-components-mini-update-v2__link-to-details-page
     # is the dedicated permalink anchor LinkedIn injects on every post card.
@@ -196,14 +198,16 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
     posts: list[dict] = []
     for elem in containers[:MAX_POSTS_PER_COMPANY]:
         try:
-            text = _text_from(elem, TEXT_SELECTORS)
+            # Priority 1: full visible text of the container — most reliable
+            # once JS has finished rendering, as it needs no specific selector.
+            text = elem.text.strip()
 
-            # Fallback 1: use the container's full visible text (may include
-            # actor name and metadata, but is better than an empty feed).
+            # Priority 2: CSS selectors targeting the post body specifically
+            # (produces cleaner output, without actor name / reaction counts).
             if not text:
-                text = elem.text.strip()
+                text = _text_from(elem, TEXT_SELECTORS)
 
-            # Fallback 2: generic placeholder so the entry is never titleless.
+            # Priority 3: placeholder so the feed is never empty.
             if not text:
                 text = f"Post from {company_url}"
 
