@@ -35,7 +35,6 @@ LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
 _LOGGED_IN_PATHS = ("/feed", "/mynetwork", "/jobs", "/messaging", "/notifications")
 
 # ─── Noise filter ─────────────────────────────────────────────────────────────────
-# Single-word / short UI labels that appear verbatim as their own line.
 _NOISE_EXACT: frozenset[str] = frozenset({
     # Spanish
     "recomendar", "comentar", "compartir", "enviar", "seguir",
@@ -49,14 +48,13 @@ _NOISE_EXACT: frozenset[str] = frozenset({
     "visible to anyone", "react", "reactions", "comments", "repost",
 })
 
-# Regex patterns for lines that contain variable numbers or templated strings.
 _NOISE_RE: list[re.Pattern] = [
     re.compile(r"^\d[\d\s.,]*\s*(reacciones?|reactions?|me gusta|likes?)\b", re.I),
     re.compile(r"^\d[\d\s.,]*\s*(comentarios?|comments?)\b", re.I),
     re.compile(r"^\d[\d\s.,]*\s*(veces\s+compartido|shares?|reposts?)\b", re.I),
     re.compile(r"^\d[\d\s.,]*\s*(seguidores?|followers?)\b", re.I),
     re.compile(r"^hace\s+\d+\s*(segundo|minuto|hora|día|semana|mes|año)s?\b", re.I),
-    re.compile(r"^\d+\s*(s|m|h|d|w)\b", re.I),          # "2d", "3w", "5h"
+    re.compile(r"^\d+\s*(s|m|h|d|w)\b", re.I),
     re.compile(r"^número de publicación en el feed\b", re.I),
     re.compile(r"^feed post number\b", re.I),
     re.compile(r"^visible\s+(para|to)\b", re.I),
@@ -199,8 +197,7 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
             if (dedupeKey && seen.has(dedupeKey)) continue;
             if (dedupeKey) seen.add(dedupeKey);
 
-            // Target the post body specifically to avoid actor / action-bar noise.
-            // Fall back to the full container only if no body element is found.
+            // ─ Text: target the post body to avoid actor/action-bar noise ─
             const bodyEl = el.querySelector(
                 '.feed-shared-update-v2__description-wrapper, ' +
                 '.update-components-text, ' +
@@ -208,12 +205,31 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
             );
             const rawText = bodyEl ? bodyEl.innerText.trim() : el.innerText.trim();
 
-            // Prioritise the activity-specific permalink (contains the post ID).
-            const linkEl =
-                el.querySelector('a[href*="feed/update/urn:li:activity"]') ||
-                el.querySelector('a[href*="/feed/update/urn"]') ||
-                el.querySelector('a.update-components-mini-update-v2__link-to-details-page') ||
-                el.querySelector('a[href*="/posts/"]');
+            // ─ Link resolution (priority order) ─────────────────────────────────
+            // 1. Build from data-urn — most reliable, always has the activity ID
+            let href = '';
+            if (urn && urn.startsWith('urn:li:activity:')) {
+                href = 'https://www.linkedin.com/feed/update/' + urn;
+            }
+            // 2. <a> whose href contains "activity-" (slug-style post permalink)
+            if (!href) {
+                const a = el.querySelector('a[href*="activity-"]');
+                if (a) href = a.href;
+            }
+            // 3. <a> whose href contains "/posts/"
+            if (!href) {
+                const a = el.querySelector('a[href*="/posts/"]');
+                if (a) href = a.href;
+            }
+            // 4. Any other feed/update anchor as last resort
+            if (!href) {
+                const a = el.querySelector(
+                    'a[href*="/feed/update/"], ' +
+                    'a.update-components-mini-update-v2__link-to-details-page'
+                );
+                if (a) href = a.href;
+            }
+            // ────────────────────────────────────────────────────────────────
 
             const dateEl = el.querySelector(
                 '.update-components-actor__sub-description span[aria-hidden="true"], ' +
@@ -223,7 +239,7 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
 
             results.push({
                 text: rawText,
-                href: linkEl ? linkEl.href : '',
+                href: href,
                 date: dateEl
                     ? (dateEl.getAttribute('datetime') || dateEl.innerText || '').trim()
                     : '',
