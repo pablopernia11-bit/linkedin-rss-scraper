@@ -120,7 +120,8 @@ def scroll_to_load(driver: webdriver.Chrome, passes: int = SCROLL_PASSES) -> Non
 
 
 def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dict]:
-    posts_url = company_url.rstrip("/") + "/posts/"
+    # Request posts sorted by recency so the RSS feed always shows the latest content.
+    posts_url = company_url.rstrip("/") + "/posts/?feedView=all&sortBy=recency"
     driver.get(posts_url)
     time.sleep(5)
     scroll_to_load(driver)
