@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import hashlib
 from datetime import datetime, timezone
@@ -33,6 +34,52 @@ LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
 # URL path fragments that indicate LinkedIn already has an active session.
 _LOGGED_IN_PATHS = ("/feed", "/mynetwork", "/jobs", "/messaging", "/notifications")
 
+# ─── Noise filter ─────────────────────────────────────────────────────────────────
+# Single-word / short UI labels that appear verbatim as their own line.
+_NOISE_EXACT: frozenset[str] = frozenset({
+    # Spanish
+    "recomendar", "comentar", "compartir", "enviar", "seguir",
+    "ver más", "ver menos", "me gusta", "mostrar traducción",
+    "ocultar traducción", "reaccionar", "reacciones", "comentarios",
+    "visible para cualquier persona", "visible para todos",
+    "publicaciones", "noticias", "inicio",
+    # English
+    "like", "comment", "share", "send", "follow", "unfollow",
+    "see more", "see less", "show translation", "hide translation",
+    "visible to anyone", "react", "reactions", "comments", "repost",
+})
+
+# Regex patterns for lines that contain variable numbers or templated strings.
+_NOISE_RE: list[re.Pattern] = [
+    re.compile(r"^\d[\d\s.,]*\s*(reacciones?|reactions?|me gusta|likes?)\b", re.I),
+    re.compile(r"^\d[\d\s.,]*\s*(comentarios?|comments?)\b", re.I),
+    re.compile(r"^\d[\d\s.,]*\s*(veces\s+compartido|shares?|reposts?)\b", re.I),
+    re.compile(r"^\d[\d\s.,]*\s*(seguidores?|followers?)\b", re.I),
+    re.compile(r"^hace\s+\d+\s*(segundo|minuto|hora|día|semana|mes|año)s?\b", re.I),
+    re.compile(r"^\d+\s*(s|m|h|d|w)\b", re.I),          # "2d", "3w", "5h"
+    re.compile(r"^número de publicación en el feed\b", re.I),
+    re.compile(r"^feed post number\b", re.I),
+    re.compile(r"^visible\s+(para|to)\b", re.I),
+    re.compile(r"^\d+\s*(impression|impresión)", re.I),
+    re.compile(r"^\d+\s*(visualización|view)s?", re.I),
+]
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _clean_post_text(raw: str) -> str:
+    """Strip LinkedIn UI chrome from raw innerText, returning only post content."""
+    cleaned: list[str] = []
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.lower() in _NOISE_EXACT:
+            continue
+        if any(p.match(s) for p in _NOISE_RE):
+            continue
+        cleaned.append(s)
+    return "\n".join(cleaned).strip()
+
 
 def build_driver() -> webdriver.Chrome:
     options = Options()
@@ -52,7 +99,7 @@ def build_driver() -> webdriver.Chrome:
 
 
 def save_session(driver: webdriver.Chrome) -> None:
-    cookies = driver.get_cookies()    
+    cookies = driver.get_cookies()
     with open(SESSION_FILE, "w") as fh:
         json.dump(cookies, fh)
     print(f"Session saved to {SESSION_FILE}")
@@ -82,11 +129,8 @@ def login(driver: webdriver.Chrome) -> None:
     print("No session found — navigating to LinkedIn login...")
     driver.get("https://www.linkedin.com/login")
 
-    # Wait until the page has settled on a LinkedIn URL.
     WebDriverWait(driver, 10).until(lambda d: "linkedin.com" in d.current_url)
 
-    # LinkedIn redirects away from /login when the browser already has a valid
-    # session (e.g. cookies set by a previous run). Skip the form in that case.
     if any(driver.current_url.startswith(f"https://www.linkedin.com{p}") for p in _LOGGED_IN_PATHS):
         print(f"Already logged in (redirected to {driver.current_url}). Saving session.")
         save_session(driver)
@@ -130,23 +174,17 @@ def _parse_pub_date(date_str: str) -> datetime:
 
 
 def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dict]:
-    # Request posts sorted by recency so the RSS feed always shows the latest content.
     posts_url = company_url.rstrip("/") + "/posts/?feedView=all&sortBy=recency"
     driver.get(posts_url)
     time.sleep(5)
     scroll_to_load(driver)
     time.sleep(3)
 
-    # Extract all post data in a single JavaScript call.
-    # Using innerText (not textContent) forces the browser's rendering engine
-    # to compute the visible text, which works correctly in headless mode and
-    # bypasses lazy-loading issues that affect Selenium's element.text.
     raw_posts: list[dict] = driver.execute_script(
         """
         const seen = new Set();
         const results = [];
 
-        // Try the most specific selector first (activity URN), then broader.
         const containers = Array.from(
             document.querySelectorAll(
                 'div.feed-shared-update-v2[data-urn*="activity"], div.feed-shared-update-v2'
@@ -156,17 +194,27 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
         for (const el of containers) {
             if (results.length >= arguments[0]) break;
 
-            // Deduplicate by URN when available, otherwise by text hash.
             const urn = el.getAttribute('data-urn') || '';
             const dedupeKey = urn || el.innerText.slice(0, 80);
             if (dedupeKey && seen.has(dedupeKey)) continue;
             if (dedupeKey) seen.add(dedupeKey);
 
-            const linkEl = el.querySelector(
-                'a.update-components-mini-update-v2__link-to-details-page, ' +
-                'a[href*="/feed/update/urn"], ' +
-                'a[href*="/posts/"]'
+            // Target the post body specifically to avoid actor / action-bar noise.
+            // Fall back to the full container only if no body element is found.
+            const bodyEl = el.querySelector(
+                '.feed-shared-update-v2__description-wrapper, ' +
+                '.update-components-text, ' +
+                '.feed-shared-text'
             );
+            const rawText = bodyEl ? bodyEl.innerText.trim() : el.innerText.trim();
+
+            // Prioritise the activity-specific permalink (contains the post ID).
+            const linkEl =
+                el.querySelector('a[href*="feed/update/urn:li:activity"]') ||
+                el.querySelector('a[href*="/feed/update/urn"]') ||
+                el.querySelector('a.update-components-mini-update-v2__link-to-details-page') ||
+                el.querySelector('a[href*="/posts/"]');
+
             const dateEl = el.querySelector(
                 '.update-components-actor__sub-description span[aria-hidden="true"], ' +
                 '.update-components-actor__sub-description, ' +
@@ -174,7 +222,7 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
             );
 
             results.push({
-                text: el.innerText.trim(),
+                text: rawText,
                 href: linkEl ? linkEl.href : '',
                 date: dateEl
                     ? (dateEl.getAttribute('datetime') || dateEl.innerText || '').trim()
@@ -191,7 +239,8 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
 
     posts: list[dict] = []
     for item in raw_posts:
-        text = (item.get("text") or "").strip()
+        raw_text = (item.get("text") or "").strip()
+        text = _clean_post_text(raw_text)
         if not text:
             text = f"Post from {company_url}"
 
@@ -207,8 +256,6 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
             }
         )
 
-    # LinkedIn renders posts top-to-bottom with the newest at the bottom when
-    # paginating via scroll; reversing puts the most recent post first.
     posts.reverse()
     return posts
 
@@ -226,8 +273,6 @@ def generate_rss(all_posts: list[dict]) -> None:
     fg.language("en")
     fg.updated(datetime.now(timezone.utc))
 
-    # Sort newest-first so RSS readers show the latest post at the top.
-    # Posts whose date can't be parsed (e.g. relative strings like "2d") sort last.
     sorted_posts = sorted(all_posts, key=lambda p: _parse_pub_date(p["date"]), reverse=True)
 
     for post in sorted_posts:
