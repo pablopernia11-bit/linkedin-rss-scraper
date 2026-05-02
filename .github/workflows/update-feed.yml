@@ -2,19 +2,22 @@ name: Update LinkedIn RSS Feed
 
 on:
   schedule:
-    # Runs every 6 hours
-    - cron: '0 6 * * *'
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+    # Every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   update-feed:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # needed to commit feed.xml back to the repo
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Full history needed so the push step doesn't fail on diverged branches
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,16 +41,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: session.json
-          # New cache key each run, but restores the most recent previous run
           key: linkedin-session-${{ github.run_id }}
           restore-keys: |
             linkedin-session-
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
-
-      - name: Restore session from secret
-        run: echo '${{ secrets.LINKEDIN_SESSION }}' > session.json
 
       - name: Run scraper
         env:
@@ -56,18 +55,20 @@ jobs:
         run: python scraper.py
 
       - name: Save LinkedIn session to cache
-        # Always save the session, even if the scraper step failed
         if: always()
         uses: actions/cache/save@v4
         with:
           path: session.json
           key: linkedin-session-${{ github.run_id }}
 
-      - name: Commit updated feed.xml
+      - name: Commit and push feed.xml
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add feed.xml
-          # Only commit if feed.xml actually changed
-          git diff --staged --quiet || git commit -m "chore: update RSS feed [$(date -u '+%Y-%m-%d %H:%M UTC')]"
-          git push origin ${{ github.ref_name }}
+          # Skip commit if feed.xml has not changed
+          git diff --staged --quiet && echo "feed.xml unchanged, skipping commit" && exit 0
+          git commit -m "chore: update RSS feed [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+          # Pull with rebase to avoid conflicts if another run pushed first
+          git pull --rebase origin main
+          git push origin main
