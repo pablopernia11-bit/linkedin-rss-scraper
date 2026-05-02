@@ -52,7 +52,7 @@ def build_driver() -> webdriver.Chrome:
 
 
 def save_session(driver: webdriver.Chrome) -> None:
-    cookies = driver.get_cookies()
+    cookies = driver.get_cookies()    
     with open(SESSION_FILE, "w") as fh:
         json.dump(cookies, fh)
     print(f"Session saved to {SESSION_FILE}")
@@ -117,6 +117,16 @@ def scroll_to_load(driver: webdriver.Chrome, passes: int = SCROLL_PASSES) -> Non
     for _ in range(passes):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2.5)
+
+
+def _parse_pub_date(date_str: str) -> datetime:
+    """Parse an ISO date string; return datetime.min on failure (sorts last)."""
+    if not date_str:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dict]:
@@ -197,6 +207,9 @@ def scrape_company_posts(driver: webdriver.Chrome, company_url: str) -> list[dic
             }
         )
 
+    # LinkedIn renders posts top-to-bottom with the newest at the bottom when
+    # paginating via scroll; reversing puts the most recent post first.
+    posts.reverse()
     return posts
 
 
@@ -213,7 +226,11 @@ def generate_rss(all_posts: list[dict]) -> None:
     fg.language("en")
     fg.updated(datetime.now(timezone.utc))
 
-    for post in all_posts:
+    # Sort newest-first so RSS readers show the latest post at the top.
+    # Posts whose date can't be parsed (e.g. relative strings like "2d") sort last.
+    sorted_posts = sorted(all_posts, key=lambda p: _parse_pub_date(p["date"]), reverse=True)
+
+    for post in sorted_posts:
         fe = fg.add_entry()
         uid = hashlib.md5(post["text"].encode()).hexdigest()
         fe.id(post["link"] if post["link"] != post["company_url"] else f"{post['company_url']}#{uid}")
@@ -222,20 +239,15 @@ def generate_rss(all_posts: list[dict]) -> None:
         fe.content(post["text"], type="text")
         fe.link(href=post["link"])
 
-        pub_date: datetime
-        if post["date"]:
-            try:
-                pub_date = datetime.fromisoformat(post["date"].replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                pub_date = datetime.now(timezone.utc)
-        else:
+        pub_date = _parse_pub_date(post["date"])
+        if pub_date == datetime.min.replace(tzinfo=timezone.utc):
             pub_date = datetime.now(timezone.utc)
 
         fe.published(pub_date)
         fe.updated(pub_date)
 
     fg.rss_file(FEED_FILE, pretty=True)
-    print(f"RSS feed written to {FEED_FILE} ({len(all_posts)} entries)")
+    print(f"RSS feed written to {FEED_FILE} ({len(sorted_posts)} entries)")
 
 
 def main() -> None:
